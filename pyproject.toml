@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "detect2shell"
+version = "0.1.0"
+description = "Authorised exposure scanner for the *2Shell / *4Shell remote code execution family"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "DanSec" }]
+keywords = ["security", "scanner", "detection", "log4shell", "cve", "vulnerability"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+]
+
+# Detect2Shell is deliberately dependency-free: it runs on the Python 3
+# standard library alone, so it can be dropped onto any box with no install
+# step and nothing to audit.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Sec-Dan/Detect2Shell"
+Source = "https://github.com/Sec-Dan/Detect2Shell"
+
+[project.scripts]
+detect2shell = "detect2shell.cli:main"
+
+[tool.setuptools]
+packages = ["detect2shell", "detect2shell.core", "detect2shell.checks"]
+
+[tool.setuptools.package-data]
+detect2shell = ["art/*.txt"]
