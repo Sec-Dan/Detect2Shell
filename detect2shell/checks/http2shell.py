@@ -55,6 +55,49 @@ class HTTP2Shell(Check):
             ["stack tells: " + ", ".join(sorted(set(tells)))],
         )
 
+    # The invalid-block-switch stream from Node's own regression test
+    # (test/parallel/test-zlib-invalid-input.js). It is a version-check vector,
+    # not the large crash input: a vulnerable decoder and a patched one reject
+    # it with different error codes, and neither corrupts memory on this input.
+    _BR_PROBE = bytes.fromhex("200010414141fcffff07002228f00b60f7f41f000000")
+    _VULN_SIGNS = ["block_length_1", "errno -9", "code: -9"]
+    _PATCHED_SIGNS = ["block_switch", "errno -17", "code: -17"]
+    _DECODE_SIGNS = ["brotli", "decompress", "decompression failed", "content-encoding", "incorrect header"]
+    _CANDIDATE_PATHS = ["/", "/api", "/api/data", "/upload", "/graphql", "/login"]
+
     def prove(self, target, ctx):
-        # Recon only: no safe remote proof of a memory-corruption bug (see probe_note).
+        # Non-disruptive: send the benign regression vector as a br request body
+        # and read the reply. Shows whether the stack decodes br request bodies
+        # (the reachable surface) and, where the app surfaces the decoder's
+        # error name, tells a pre-patch error from the patched one. It never
+        # sends the crash input and never reads response bytes for leaked memory.
+        for path in self._CANDIDATE_PATHS:
+            resp = ctx.client.post(
+                target.url(path), data=self._BR_PROBE,
+                headers={"Content-Encoding": "br", "Content-Type": "application/json"},
+            )
+            if resp.status is None:
+                continue
+            body = resp.text[:2000].lower()
+            if any(s in body for s in self._VULN_SIGNS):
+                return self.finding(
+                    target, Confidence.LIKELY, Tier.PROVE,
+                    "The Brotli decoder surfaced a pre-patch error for the regression vector at {} - the "
+                    "decoder predates the fix. Confirm the exact build host-side.".format(path),
+                    ["pre-patch Brotli error signature in the response to the br probe at {}".format(path)],
+                )
+            if any(s in body for s in self._PATCHED_SIGNS):
+                return self.finding(
+                    target, Confidence.NOT_DETECTED, Tier.PROVE,
+                    "The Brotli decoder returned the patched error for the regression vector at {} - the "
+                    "fix is present on this decode path.".format(path),
+                    ["patched Brotli error signature in the response to the br probe at {}".format(path)],
+                )
+            if any(s in body for s in self._DECODE_SIGNS) or resp.status in (400, 415, 422, 500, 502):
+                return self.finding(
+                    target, Confidence.POSSIBLE, Tier.PROVE,
+                    "The stack decodes br request bodies at {} (reachable surface) but did not surface the "
+                    "decoder's version - confirm the Brotli build host-side.".format(path),
+                    ["br request-body decoding reachable at {} (status {})".format(path, resp.status)],
+                )
         return None
