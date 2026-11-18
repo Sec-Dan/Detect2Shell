@@ -1,7 +1,9 @@
 """Command-line entrypoint: splash, consent, scan, report."""
 
 import argparse
+import json
 import os
+import secrets
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
@@ -49,6 +51,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--only", help="comma-separated check keys to run (see --list-checks)")
     parser.add_argument("--exclude", help="comma-separated check keys to skip")
     parser.add_argument("--list-checks", action="store_true", help="list available checks and exit")
+    parser.add_argument("--host-check", action="store_true",
+                        help="run the local Java4Shell exploitability check (asks the JVM directly; "
+                             "no network, no targets). Pass --java PATH to pick a JVM.")
+    parser.add_argument("--java", action="append", dest="javas", metavar="PATH",
+                        help="with --host-check: a java binary to inspect (repeatable)")
+    parser.add_argument("--egress-check", action="store_true",
+                        help="run the host-side egress canary (can this box reach a destination you "
+                             "control over DNS/HTTP/TCP?). Use --egress-url / --egress-tcp / --egress-dns.")
+    parser.add_argument("--egress-url", action="append", dest="egress_urls", metavar="URL",
+                        help="with --egress-check: HTTP(S) URL to GET (repeatable)")
+    parser.add_argument("--egress-tcp", action="append", dest="egress_tcps", metavar="HOST:PORT",
+                        help="with --egress-check: raw TCP destination (repeatable)")
+    parser.add_argument("--egress-dns", action="append", dest="egress_names", metavar="NAME",
+                        help="with --egress-check: hostname to resolve (repeatable)")
 
     group = parser.add_argument_group("detection tiers")
     group.add_argument("--confirm", action="store_true",
@@ -78,6 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     group = parser.add_argument_group("output")
     group.add_argument("--json", dest="json_path", help="write the full result set as JSON to this path")
+    group.add_argument("--trace", dest="trace_path",
+                       help="write every HTTP request sent (method, url, status, timestamp, run marker) "
+                            "to this path as JSON lines, for correlating the scan in your logs/SIEM")
     group.add_argument("--no-color", action="store_true", help="disable coloured output")
     group.add_argument("--no-banner", action="store_true", help="suppress the splash banner")
     group.add_argument("--show-clean", action="store_true", help="also show checks that found nothing")
@@ -120,6 +139,31 @@ def main(argv=None) -> int:
         for check in checks_base.all_checks():
             print("{:<14} {:<22} {}".format(check.key, check.name, ", ".join(check.cves)))
         return 0
+
+    # Host-side companion: local, read-only, no remote target or consent gate.
+    if args.host_check:
+        from . import hostcheck
+        host_argv = []
+        for java_bin in (args.javas or []):
+            host_argv += ["--java", java_bin]
+        if args.no_color:
+            host_argv.append("--no-color")
+        return hostcheck.run(host_argv)
+
+    # Host-side egress canary: only reaches destinations the operator passes.
+    if args.egress_check:
+        from . import egress
+        egress_argv = []
+        for url in (args.egress_urls or []):
+            egress_argv += ["--egress-url", url]
+        for tcp in (args.egress_tcps or []):
+            egress_argv += ["--egress-tcp", tcp]
+        for name in (args.egress_names or []):
+            egress_argv += ["--egress-dns", name]
+        egress_argv += ["--timeout", str(args.timeout)]
+        if args.no_color:
+            egress_argv.append("--no-color")
+        return egress.run(egress_argv)
 
     # --- collect targets ---
     raw = list(args.targets)
@@ -170,7 +214,14 @@ def main(argv=None) -> int:
     # --- identity / client ---
     scanner_ip = netinfo.resolve_scanner_ip(override=args.scanner_ip, allow_network=not args.no_ip_lookup)
     user_agent = build_user_agent(scanner_ip)
-    client = HttpClient(user_agent, timeout=args.timeout, verify_tls=args.verify_tls, rate=args.rate)
+    # A unique per-run marker rides every request as X-Detect2Shell-Probe, so an
+    # operator can pull this exact scan out of their logs/SIEM by one token and
+    # build a detection from the request shape while they patch.
+    run_marker = "d2s-" + secrets.token_hex(6)
+    client = HttpClient(user_agent, timeout=args.timeout, verify_tls=args.verify_tls, rate=args.rate,
+                        extra_headers={"X-Detect2Shell-Probe": run_marker})
+    if args.trace_path:
+        client.enable_trace()
 
     # --- reachability pre-check (concurrent, so a dead CIDR does not stall) ---
     def _reach(target):
@@ -224,6 +275,7 @@ def main(argv=None) -> int:
     _err(palette.dim("targets: {}   checks: {}   tier: {}   scanner-ip: {}".format(
         len(target_list), len(checks), authorisation.max_tier.name.lower(), scanner_ip)))
     _err(palette.dim("user-agent: {}".format(user_agent)))
+    _err(palette.dim("run marker: {}  (sent as X-Detect2Shell-Probe on every request)".format(run_marker)))
     if listener:
         _err(palette.dim("canary: http://{}:{}/  (advertising {})".format(
             listener.bind_host, listener.http_port, listener.advertise_host)))
@@ -244,6 +296,7 @@ def main(argv=None) -> int:
         meta = {
             "scanner_ip": scanner_ip,
             "user_agent": user_agent,
+            "run_marker": run_marker,
             "tier": authorisation.max_tier.name.lower(),
             "allow_disruptive": authorisation.allow_disruptive,
             "targets": [t.base_url for t in target_list],
@@ -255,6 +308,15 @@ def main(argv=None) -> int:
         except OSError as exc:
             _err(palette.paint("could not write JSON report: {}".format(exc), "1;31"))
             json_failed = True
+
+    if args.trace_path:
+        try:
+            with open(args.trace_path, "w", encoding="utf-8") as handle:
+                for row in client.get_trace():
+                    handle.write(json.dumps(row) + "\n")
+            _err(palette.dim("wrote request trace to {}".format(args.trace_path)))
+        except OSError as exc:
+            _err(palette.paint("could not write request trace: {}".format(exc), "1;31"))
 
     code = report_mod.exit_code(findings)
     if json_failed and code == 0:

@@ -9,3 +9,4 @@ from . import text4shell  # noqa: F401
 from . import react2shell  # noqa: F401
 from . import php2shell  # noqa: F401
 from . import http2shell  # noqa: F401
+from . import java4shell  # noqa: F401

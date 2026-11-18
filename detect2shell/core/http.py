@@ -72,6 +72,10 @@ class HttpClient:
         self._min_interval = (1.0 / rate) if rate and rate > 0 else 0.0
         self._lock = threading.Lock()
         self._last = 0.0
+        # Opt-in request trace, for correlating scan traffic in a SIEM. Off until
+        # enable_trace() is called; appends are guarded by their own lock.
+        self._trace = None
+        self._trace_lock = threading.Lock()
 
         if verify_tls:
             ctx = ssl.create_default_context()
@@ -84,6 +88,30 @@ class HttpClient:
             urllib.request.ProxyHandler({}),
             urllib.request.HTTPSHandler(context=ctx),
         )
+
+    def enable_trace(self) -> None:
+        with self._trace_lock:
+            if self._trace is None:
+                self._trace = []
+
+    def get_trace(self):
+        with self._trace_lock:
+            return list(self._trace or [])
+
+    def _record(self, method, url, resp: "Response") -> None:
+        if self._trace is None:
+            return
+        row = {
+            "at": time.time(),
+            "method": method.upper(),
+            "url": url,
+            "status": resp.status,
+            "elapsed_ms": round(resp.elapsed * 1000, 1),
+            "marker": self.extra_headers.get("X-Detect2Shell-Probe"),
+            "error": resp.error,
+        }
+        with self._trace_lock:
+            self._trace.append(row)
 
     def _throttle(self) -> None:
         if self._min_interval <= 0:
@@ -110,7 +138,7 @@ class HttpClient:
         try:
             with self._opener.open(req, timeout=timeout or self.timeout) as resp:
                 body = resp.read(self.max_body)
-                return Response(
+                response = Response(
                     url=resp.geturl(),
                     status=resp.getcode(),
                     headers=_lower_headers(resp.headers),
@@ -123,7 +151,7 @@ class HttpClient:
                 body = exc.read(self.max_body)
             except Exception:
                 pass
-            return Response(
+            response = Response(
                 url=url,
                 status=exc.code,
                 headers=_lower_headers(exc.headers),
@@ -131,12 +159,14 @@ class HttpClient:
                 elapsed=time.monotonic() - start,
             )
         except Exception as exc:
-            return Response(
+            response = Response(
                 url=url,
                 status=None,
                 elapsed=time.monotonic() - start,
                 error="{}: {}".format(type(exc).__name__, exc),
             )
+        self._record(method, url, response)
+        return response
 
     def get(self, url, headers=None, timeout=None) -> Response:
         return self.request("GET", url, headers=headers, timeout=timeout)
@@ -178,7 +208,7 @@ class HttpClient:
             conn.request(method.upper(), path, body=data, headers=hdrs)
             resp = conn.getresponse()
             body = resp.read(self.max_body)
-            return Response(
+            response = Response(
                 url=url,
                 status=resp.status,
                 headers=_lower_headers(resp.headers),
@@ -186,7 +216,7 @@ class HttpClient:
                 elapsed=time.monotonic() - start,
             )
         except Exception as exc:
-            return Response(
+            response = Response(
                 url=url,
                 status=None,
                 elapsed=time.monotonic() - start,
@@ -198,3 +228,5 @@ class HttpClient:
                     conn.close()
                 except Exception:
                     pass
+        self._record(method, url, response)
+        return response

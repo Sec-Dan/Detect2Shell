@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "detect2shell"
-version = "0.1.0"
+version = "0.2.0"
 description = "Authorised exposure scanner for the *2Shell / *4Shell remote code execution family"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
 authors = [{ name = "DanSec" }]
-keywords = ["security", "scanner", "detection", "log4shell", "cve", "vulnerability"]
+keywords = ["security", "scanner", "detection", "log4shell", "java4shell", "cve", "vulnerability"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
