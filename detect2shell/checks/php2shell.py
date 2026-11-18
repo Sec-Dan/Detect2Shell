@@ -1,6 +1,12 @@
-"""PHP2Shell - PHP core memory-safety bugs in the session upload-progress handler
-(CVE-2026-109618 / CVE-2026-109619). Recon only: no safe remote proof, so prove
-runs no active test and defers to a host-side version check.
+"""PHP2Shell - two PHP core request-lifecycle memory-safety bugs
+(CVE-2026-109618 / CVE-2026-109619). Per the php.net advisories: 109618 is
+state corruption when an out-of-memory bailout leaves request data
+half-initialised, and 109619 is a use-after-free of request state that a later
+request on the same worker reads (the session upload-progress path is one such
+reader, not the bug itself). Recon only: the triggering condition makes a
+patched build fail the same way (500, or a 502 when the worker is killed), so a
+remote probe cannot tell patched from vulnerable. Defers to a host-side version
+check.
 """
 
 import re
@@ -23,23 +29,25 @@ def _php_affected(version):
 class PHP2Shell(Check):
     key = "php2shell"
     name = "PHP2Shell"
-    component = "PHP core (session upload-progress handler)"
+    component = "PHP core (request-lifecycle state handling)"
     cves = ["CVE-2026-109618", "CVE-2026-109619"]
     severity = Severity.CRITICAL
-    affected = "PHP < 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 (root cause present since 5.4)"
+    affected = "PHP < 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 (unofficial backports exist for 7.4 / 8.0 / 8.1)"
     remediation = ("Upgrade PHP to >= 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 (or the vendor-backported "
                    "package) and restart every worker; no config-only fix is complete.")
     references = [
         "https://www.php.net/archive/2026.php#2026-10-21-5",
+        "https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w",
+        "https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp",
         "https://securitylabs.datadoghq.com/articles/php2shell-critical-vulnerabilities-in-php/",
-        "https://blog.qualys.com/vulnerabilities-threat-research/2026/10/20/php-announces-critical-security-release-for-two-vulnerabilities",
     ]
     supports_confirm = False
     supports_prove = True
     disruptive = False
-    probe_note = ("This is a memory-safety bug - confirming it would mean running the full exploit "
-                  "chain to code execution, which this detector deliberately does not carry. Take the "
-                  "signatures above as \"could be vulnerable\" and confirm the installed version host-side.")
+    probe_note = ("This is a memory-safety bug, and the input that triggers it also makes a *patched* PHP fail "
+                  "(a 500, or a 502 when the worker is killed) - so there is no remote probe that tells patched "
+                  "from vulnerable without driving the exploit, which this detector does not do. Take the "
+                  "signatures above as \"could be vulnerable\" and confirm the installed PHP version host-side.")
 
     def passive(self, target, ctx):
         resp = ctx.get(target)
